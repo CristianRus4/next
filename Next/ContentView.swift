@@ -79,6 +79,14 @@ struct AgendaView: View {
     var prefetchedEvents: [EKEvent]
     var prefetchedReminders: [EKReminder]
     
+    // Add this computed property inside AgendaView:
+
+    private var preloadedLists: [EKCalendar] {
+        eventStore.calendars(for: .reminder)
+            .filter { !hiddenListIds.contains($0.calendarIdentifier) }
+            .sorted { $0.title < $1.title }
+    }
+    
     var body: some View {
         NavigationStack {
             ZStack {
@@ -292,8 +300,8 @@ struct AgendaView: View {
                 }
             }
             .sheet(isPresented: $showingComposer) {
-                TaskComposerView()
-                    .presentationDetents([.height(350)])
+                UniversalTaskComposerView(preloadedLists: preloadedLists)
+                    .presentationDetents([.height(160)])
                     .presentationDragIndicator(.visible)
             }
             .navigationTitle(navigationTitle)
@@ -547,6 +555,13 @@ struct NextView: View {
     @AppStorage("manualReminderOrder") private var manualOrder = Data()
     @State private var showingComposer = false
     
+    // Add this computed property
+    private var preloadedLists: [EKCalendar] {
+        eventStore.calendars(for: .reminder)
+            .filter { !hiddenListIds.contains($0.calendarIdentifier) }
+            .sorted { $0.title < $1.title }
+    }
+    
     private var hiddenListIds: Set<String> {
         if let decoded = try? JSONDecoder().decode(Set<String>.self, from: hiddenLists) {
             return decoded
@@ -556,10 +571,8 @@ struct NextView: View {
     
     private var orderedReminders: [EKReminder] {
         if let orderData = try? JSONDecoder().decode([String].self, from: manualOrder) {
-            // Create a dictionary for quick lookup
             let reminderDict = Dictionary(uniqueKeysWithValues: reminders.map { ($0.calendarItemIdentifier, $0) })
             
-            // First, add reminders in the saved order
             var ordered: [EKReminder] = []
             for id in orderData {
                 if let reminder = reminderDict[id] {
@@ -567,7 +580,6 @@ struct NextView: View {
                 }
             }
             
-            // Then add any new reminders that aren't in the saved order
             let orderedIds = Set(orderData)
             let remaining = reminders.filter { !orderedIds.contains($0.calendarItemIdentifier) }
             ordered.append(contentsOf: remaining)
@@ -621,7 +633,7 @@ struct NextView: View {
                         }
                         .padding(.vertical, 4)
                         .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 4, trailing: 120))  // Changed trailing from 16 to 120
+                        .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 4, trailing: 120))
                         .listRowBackground(Color.clear)
                     }
                     .onMove { from, to in
@@ -632,91 +644,60 @@ struct NextView: View {
                         }
                     }
                 }
-            }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .scrollIndicators(.hidden)  // Add this line
-            
-            VStack {
-                Spacer()
-                HStack {
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .scrollIndicators(.hidden)
+                
+                // Floating action button
+                VStack {
                     Spacer()
-                    Button(action: {
-                        HapticManager.selection()
-                        showingComposer = true
-                    }) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(.white)
-                            .frame(width: 60, height: 30)
+                    HStack {
+                        Spacer()
+                        Button(action: {
+                            HapticManager.selection()
+                            showingComposer = true
+                        }) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundColor(.white)
+                                .frame(width: 60, height: 30)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.capsule)
+                        .tint(Color.currentAccent)
+                        .padding(.trailing, 20)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .buttonBorderShape(.roundedRectangle(radius: 24))  // Changed from .capsule to .roundedRectangle with radius 24
-                    .tint(Color.currentAccent)
-                    .padding(.trailing, 20)
+                    .padding(.bottom, 20)
                 }
-                .padding(.bottom, 20)
             }
         }
         .sheet(isPresented: $showingComposer) {
-            TaskComposerView()
-                .presentationDetents([.height(120)])  // Changed from 200 to 120
-                .presentationDragIndicator(.visible)
+            UniversalTaskComposerView(preloadedLists: preloadedLists)
+                .presentationDetents([.height(160)])
+                    .presentationDragIndicator(.visible)
         }
         .navigationTitle("Next")
         .task {
             await fetchTodayReminders()
         }
+        .background(Color.customBackground)
     }
     
-    private func fetchTodayReminders() async {
-        do {
-            let calendar = Calendar.current
-            let today = calendar.startOfDay(for: Date())
-            let tomorrow = calendar.date(byAdding: .day, value: 1, to: today)!
-            
-            let visibleCalendars = eventStore.calendars(for: .reminder)
-                .filter { !hiddenListIds.contains($0.calendarIdentifier) }
-            var todayAndOverdueReminders: [EKReminder] = []
-            
-            for reminderCalendar in visibleCalendars {
-                let predicate = eventStore.predicateForReminders(in: [reminderCalendar])
-                let fetchedReminders = try await withCheckedThrowingContinuation { continuation in
-                    eventStore.fetchReminders(matching: predicate) { reminders in
-                        if let reminders = reminders {
-                            continuation.resume(returning: reminders)
-                        } else {
-                            continuation.resume(throwing: NSError(domain: "ReminderError", code: -1))
-                        }
-                    }
-                }
-                
-                // Filter for today's and overdue uncompleted reminders
-                let filtered = fetchedReminders.filter { reminder in
-                    guard let dueDate = reminder.dueDateComponents?.date else { return false }
-                    return dueDate < tomorrow && !reminder.isCompleted
-                }
-                
-                todayAndOverdueReminders.append(contentsOf: filtered)
-            }
-            
-            // Sort by time
-            let sortedReminders = todayAndOverdueReminders.sorted { first, second in
-                guard let date1 = first.dueDateComponents?.date,
-                      let date2 = second.dueDateComponents?.date else {
-                    return false
-                }
-                return date1 < date2
-            }
-            
-            await MainActor.run {
-                self.reminders = sortedReminders
-            }
-        } catch {
-            print("Error fetching reminders: \(error)")
+    // Add these functions inside NextView:
+
+    private func checkboxSymbol(for reminder: EKReminder) -> String {
+        if reminder.isCompleted {
+            return "checkmark.square"
         }
+        if reminder.hasRecurrenceRules {
+            return "arrow.clockwise"
+        }
+        if reminder.priority != 0 {
+            return "triangle"
+        }
+        return "square"
     }
-    
+
     private func formatTime(_ date: Date) -> String {
         let calendar = Calendar.current
         let now = Date()
@@ -760,20 +741,13 @@ struct NextView: View {
         // Otherwise show date and time
         return "\(dateFormatter.string(from: date)), \(timeString)"
     }
-    
-    private func checkboxSymbol(for reminder: EKReminder) -> String {
-        if reminder.isCompleted {
-            return "checkmark.square"
-        }
-        if reminder.hasRecurrenceRules {
-            return "arrow.clockwise"
-        }
-        if reminder.priority != 0 {
-            return "triangle"
-        }
-        return "square"
+
+    private func isOverdue(_ date: Date) -> Bool {
+        let calendar = Calendar.current
+        let now = Date()
+        return date < calendar.startOfDay(for: now)
     }
-    
+
     private func toggleReminder(_ reminder: EKReminder) {
         reminder.isCompleted = !reminder.isCompleted
         if reminder.isCompleted {
@@ -787,17 +761,60 @@ struct NextView: View {
             HapticManager.selection()
             Task {
                 await fetchTodayReminders()
-                await updateApplicationBadge(eventStore: eventStore)  // Add this line
+                await updateApplicationBadge(eventStore: eventStore)
             }
         } catch {
             print("Error saving reminder: \(error)")
         }
     }
-    
-    private func isOverdue(_ date: Date) -> Bool {
-        let calendar = Calendar.current
-        let now = Date()
-        return date < calendar.startOfDay(for: now)
+
+    private func fetchTodayReminders() async {
+        do {
+            let calendar = Calendar.current
+            let today = calendar.startOfDay(for: Date())
+            let tomorrow = calendar.date(byAdding: .day, value: 1, to: today)!
+            
+            let visibleCalendars = eventStore.calendars(for: .reminder)
+                .filter { !hiddenListIds.contains($0.calendarIdentifier) }
+            
+            var todayReminders: [EKReminder] = []
+            
+            for reminderCalendar in visibleCalendars {
+                let predicate = eventStore.predicateForReminders(in: [reminderCalendar])
+                let fetchedReminders = try await withCheckedThrowingContinuation { continuation in
+                    eventStore.fetchReminders(matching: predicate) { reminders in
+                        if let reminders = reminders {
+                            continuation.resume(returning: reminders)
+                        } else {
+                            continuation.resume(throwing: NSError(domain: "ReminderError", code: -1))
+                        }
+                    }
+                }
+                
+                let filtered = fetchedReminders.filter { reminder in
+                    guard let dueDate = reminder.dueDateComponents?.date else { return false }
+                    return dueDate >= today && 
+                           dueDate < tomorrow && 
+                           !reminder.isCompleted
+                }
+                
+                todayReminders.append(contentsOf: filtered)
+            }
+            
+            let sortedReminders = todayReminders.sorted { first, second in
+                guard let date1 = first.dueDateComponents?.date,
+                      let date2 = second.dueDateComponents?.date else {
+                    return false
+                }
+                return date1 < date2
+            }
+            
+            await MainActor.run {
+                self.reminders = sortedReminders
+            }
+        } catch {
+            print("Error fetching reminders: \(error)")
+        }
     }
 }
 
@@ -806,6 +823,13 @@ struct AllTasksView: View {
     @State private var reminders: [EKReminder] = []
     @AppStorage("hiddenLists") private var hiddenLists = Data()
     @State private var showingComposer = false
+    
+    // Add this computed property
+    private var preloadedLists: [EKCalendar] {
+        eventStore.calendars(for: .reminder)
+            .filter { !hiddenListIds.contains($0.calendarIdentifier) }
+            .sorted { $0.title < $1.title }
+    }
     
     private var hiddenListIds: Set<String> {
         if let decoded = try? JSONDecoder().decode(Set<String>.self, from: hiddenLists) {
@@ -853,8 +877,6 @@ struct AllTasksView: View {
                                     }
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                                    
-                                
                                 }
                             }
                         }
@@ -890,9 +912,9 @@ struct AllTasksView: View {
                 }
             }
             .sheet(isPresented: $showingComposer) {
-                TaskComposerView()
-                    .presentationDetents([.height(350)])
-                    .presentationDragIndicator(.visible)
+                UniversalTaskComposerView(preloadedLists: preloadedLists)
+                    .presentationDetents([.height(160)])
+                        .presentationDragIndicator(.visible)
             }
             .navigationTitle("All Tasks")
             .task {
@@ -1419,6 +1441,20 @@ struct ListView: View {
     @State private var completingReminders: Set<String> = []
     @State private var showingComposer = false
     
+    // Add this computed property
+    private var preloadedLists: [EKCalendar] {
+        eventStore.calendars(for: .reminder)
+            .filter { !hiddenListIds.contains($0.calendarIdentifier) }
+            .sorted { $0.title < $1.title }
+    }
+    
+    private var hiddenListIds: Set<String> {
+        if let decoded = try? JSONDecoder().decode(Set<String>.self, from: Data(UserDefaults.standard.data(forKey: "hiddenLists") ?? Data())) {
+            return decoded
+        }
+        return []
+    }
+    
     var body: some View {
         NavigationStack {
             ZStack {
@@ -1497,8 +1533,8 @@ struct ListView: View {
                 }
             }
             .sheet(isPresented: $showingComposer) {
-                TaskComposerView()
-                    .presentationDetents([.height(350)])
+                UniversalTaskComposerView(preloadedLists: preloadedLists)
+                    .presentationDetents([.height(160)])
                     .presentationDragIndicator(.visible)
             }
             .navigationTitle(calendar.title)
@@ -1818,6 +1854,9 @@ struct ContentView: View {
         }
     }
     
+    // Add this new state variable
+    @State private var showingUniversalComposer = false
+    
     var body: some View {
         NavigationStack {
             ZStack {
@@ -1936,7 +1975,7 @@ struct ContentView: View {
                             .padding(.leading, -20)  // Add this line
                     }
                     
-                    // Preferences button at the bottom
+                    // Preferences section
                     Section {
                         NavigationLink {
                             PreferencesView(onListsChanged: {
@@ -1951,14 +1990,28 @@ struct ContentView: View {
                                     .foregroundStyle(.primary)
                             } icon: {
                                 Image(systemName: "switch.2")
-                                    .foregroundStyle(Color(red: 66/255, green: 72/255, blue: 78/255))  // Changed from .primary to Storm gray
+                                    .foregroundStyle(Color(red: 66/255, green: 72/255, blue: 78/255))
                             }
                         }
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 16))
-                        .tint(.clear)
+                        
+                        // Add new universal composer button
+                        Button(action: {
+                            HapticManager.selection()
+                            showingUniversalComposer = true
+                        }) {
+                            Label {
+                                Text("Add")
+                                    .foregroundStyle(.primary)
+                            } icon: {
+                                Image(systemName: "plus.circle.fill")
+                                    .foregroundStyle(Color.currentAccent)
+                            }
+                        }
                     }
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 16))
+                    .tint(.clear)
                 }
                 .scrollDisabled(true)
                 .frame(maxHeight: .infinity, alignment: .top)
@@ -1993,10 +2046,17 @@ struct ContentView: View {
         .onAppear {
             HapticManager.impact()
             preloadComposer()  // Add this line
+            // Enable screen idle timer
+            UIApplication.shared.isIdleTimerDisabled = false
         }
         .task {
             await updateApplicationBadge(eventStore: eventStore)
             await prefetchAgendaData()  // Add this line
+        }
+        .sheet(isPresented: $showingUniversalComposer) {
+            UniversalTaskComposerView(preloadedLists: preloadedLists)
+                .presentationDetents([.height(160)])  // Changed from 350 to 160
+                .presentationDragIndicator(.visible)
         }
     }
     
@@ -2198,7 +2258,7 @@ struct TaskComposerView: View {
     @State private var selectedList: EKCalendar?
     @FocusState private var isTitleFocused: Bool
     
-    private let timeButtons = [
+    private let timeButtons: [(String, () -> Date)] = [
         ("Now", { Date() }),
         ("Today", { Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: Date()) ?? Date() }),
         ("Tmw", {
@@ -2208,12 +2268,14 @@ struct TaskComposerView: View {
                 second: 0,
                 of: Calendar.current.date(byAdding: .day, value: 1, to: Date()) ?? Date()
             ) ?? Date()
-        })
+        }),
+        ("+1h", { Calendar.current.date(byAdding: .hour, value: 1, to: Date()) ?? Date() }),
+        ("+6h", { Calendar.current.date(byAdding: .hour, value: 6, to: Date()) ?? Date() })
     ]
     
     private let hourButtons = [
         ("9am", 9), ("12pm", 12), ("6pm", 18),
-        ("+1h", 1), ("+6h", 6), ("+24h", 24)
+        ("+1h", 1), ("+6h", 6)  // Removed "+24h" from here
     ]
     
     // Add this new property
@@ -2331,11 +2393,9 @@ private struct DueDateView: View {
     var body: some View {
         Text(formatDueDateTime())
             .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(Color.secondary.opacity(0.1))
-            .cornerRadius(6)
+            .foregroundStyle(Color.currentAccent)
+            .padding(.vertical, 2)
+            .multilineTextAlignment(.trailing)
     }
     
     private func formatDueDateTime() -> String {
@@ -2347,7 +2407,8 @@ private struct DueDateView: View {
         timeFormatter.amSymbol = "am"
         timeFormatter.pmSymbol = "pm"
         
-        return "\(dateFormatter.string(from: date))\n\(timeFormatter.string(from: time).lowercased())"
+        // Combine time and date in one row
+        return "\(timeFormatter.string(from: time).lowercased()) • \(dateFormatter.string(from: date))"
     }
     
     private func daySuffix(for date: Date) -> String {
@@ -2397,14 +2458,23 @@ private struct QuickActionButtons: View {
             HStack(spacing: 8) {
                 ForEach(timeButtons, id: \.0) { title, action in
                     QuickButton(title: title) {
-                        let newDate = action()
-                        selectedDate = newDate
-                        selectedTime = newDate
+                        if title == "+1D" {
+                            // Add one day to current selected date
+                            let newDate = Calendar.current.date(byAdding: .day, value: 1, to: selectedDate) ?? Date()
+                            selectedDate = newDate
+                            selectedTime = newDate
+                        } else {
+                            let newDate = action()
+                            selectedDate = newDate
+                            selectedTime = newDate
+                        }
+                        HapticManager.selection()
                     }
                 }
                 
                 QuickButton(title: "•••") {
                     showingDatePicker.toggle()
+                    HapticManager.selection()
                 }
             }
             
@@ -2412,26 +2482,19 @@ private struct QuickActionButtons: View {
                 ForEach(hourButtons, id: \.0) { title, hours in
                     QuickButton(title: title) {
                         if title.hasPrefix("+") {
-                            addHours(hours)
+                            // Add hours to current selected date/time
+                            let newDate = Calendar.current.date(byAdding: .hour, value: hours, to: selectedDate) ?? Date()
+                            selectedDate = newDate
+                            selectedTime = newDate
                         } else {
-                            setTime(hours)
+                            // Set specific hour
+                            selectedTime = Calendar.current.date(bySettingHour: hours, minute: 0, second: 0, of: selectedDate) ?? Date()
                         }
+                        HapticManager.selection()
                     }
                 }
             }
         }
-    }
-    
-    private func setTime(_ hour: Int) {
-        selectedTime = Calendar.current.date(bySettingHour: hour, minute: 0, second: 0, of: Date()) ?? Date()
-        HapticManager.selection()
-    }
-    
-    private func addHours(_ hours: Int) {
-        let newDate = Calendar.current.date(byAdding: .hour, value: hours, to: Date()) ?? Date()
-        selectedDate = newDate
-        selectedTime = newDate
-        HapticManager.selection()
     }
 }
 
@@ -2442,9 +2505,13 @@ private struct QuickButton: View {
     var body: some View {
         Button(action: action) {
             Text(title)
+                .font(.caption)  // Make text smaller
+                .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity)
+                .padding(0)  // Remove all padding
         }
         .buttonStyle(.bordered)
+        .buttonBorderShape(.capsule)
     }
 }
 
@@ -2628,7 +2695,6 @@ func updateApplicationBadge(eventStore: EKEventStore) async {
         let visibleCalendars = eventStore.calendars(for: .reminder)
             .filter { !hiddenListIds.contains($0.calendarIdentifier) }
             
-        // Create array to store task count
         var taskCount = 0
         
         for reminderCalendar in visibleCalendars {
@@ -2643,7 +2709,6 @@ func updateApplicationBadge(eventStore: EKEventStore) async {
                 }
             }
             
-            // Count filtered reminders directly
             let filteredCount = fetchedReminders.filter { reminder in
                 guard let dueDate = reminder.dueDateComponents?.date else { return false }
                 return dueDate >= today && 
@@ -2654,7 +2719,7 @@ func updateApplicationBadge(eventStore: EKEventStore) async {
             taskCount += filteredCount
         }
         
-        // Update the app badge on the main actor
+        // Update the app badge
         await MainActor.run {
             UNUserNotificationCenter.current().setBadgeCount(taskCount) { error in
                 if let error = error {
@@ -2665,6 +2730,181 @@ func updateApplicationBadge(eventStore: EKEventStore) async {
         
     } catch {
         print("Error updating badge count: \(error)")
+    }
+}
+
+// Replace the UniversalTaskComposerView with this simplified version:
+
+struct UniversalTaskComposerView: View {
+    @Environment(\.dismiss) private var dismiss
+    let eventStore = EKEventStore()
+    
+    @State private var taskTitle = ""
+    @State private var notes = ""
+    @State private var selectedDate = Date()
+    @State private var selectedTime = Date()
+    @State private var showingDatePicker = false
+    @State private var selectedList: EKCalendar?
+    @FocusState private var isTitleFocused: Bool
+    @State private var isPriority = false
+    
+    private let timeButtons: [(String, () -> Date)] = [
+        ("Now", { Date() }),
+        ("Today", { Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: Date()) ?? Date() }),
+        ("Tmw", {
+            Calendar.current.date(
+                bySettingHour: 9,
+                minute: 0,
+                second: 0,
+                of: Calendar.current.date(byAdding: .day, value: 1, to: Date()) ?? Date()
+            ) ?? Date()
+        }),
+        ("+1D", { Calendar.current.date(byAdding: .day, value: 1, to: Date()) ?? Date() })
+    ]
+    
+    private let hourButtons = [
+        ("9am", 9), ("12pm", 12), ("6pm", 18),
+        ("+1h", 1), ("+6h", 6)
+    ]
+    
+    let preloadedLists: [EKCalendar]
+    
+    init(preloadedLists: [EKCalendar] = []) {
+        self.preloadedLists = preloadedLists
+        if let defaultList = preloadedLists.first {
+            _selectedList = State(initialValue: defaultList)
+        }
+    }
+    
+    var body: some View {
+        NavigationStack {
+            Form {
+                VStack(spacing: 4) {
+                    // Title and Due Date Row
+                    HStack(spacing: 12) {
+                        TextField("Task title...", text: $taskTitle)
+                            .focused($isTitleFocused)
+                            .onSubmit(createTaskIfValid)
+                            .font(.title3.bold())
+                            .textFieldStyle(.plain)
+                        
+                        DueDateView(date: selectedDate, time: selectedTime)
+                    }
+                    .padding(.bottom, 12)  // Changed from 8 to 12
+                    
+                    // Notes Row with Priority Button and List Button
+                    HStack(spacing: 12) {
+                        TextField("Add a note...", text: $notes)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .textFieldStyle(.plain)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .layoutPriority(1)  // Give priority to notes field
+                        
+                        Button(action: {
+                            isPriority.toggle()
+                            HapticManager.selection()
+                        }) {
+                            Image(systemName: isPriority ? "flag.fill" : "flag")
+                                .font(.caption)
+                                .foregroundStyle(isPriority ? Color.currentAccent : .secondary)
+                                .frame(maxWidth: .infinity)
+                                .padding(0)
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.capsule)
+                        .frame(width: UIScreen.main.bounds.width * 0.10)  // 10% of screen width
+                        
+                        Button(action: {
+                            // Action for list selection
+                            HapticManager.selection()
+                        }) {
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(Color(cgColor: selectedList?.cgColor ?? .init(gray: 0.5, alpha: 1.0)))
+                                    .frame(width: 8, height: 8)
+                                Text(selectedList?.title ?? "List")
+                                    .lineLimit(1)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(0)
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.capsule)
+                        .frame(width: UIScreen.main.bounds.width * 0.20)  // 20% of screen width
+                    }
+                    
+                    // Quick Actions
+                    QuickActionButtons(
+                        timeButtons: timeButtons,
+                        hourButtons: hourButtons,
+                        showingDatePicker: $showingDatePicker,
+                        selectedDate: $selectedDate,
+                        selectedTime: $selectedTime
+                    )
+                    .padding(.top, 8)
+                }
+                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                .listRowBackground(Color.clear)
+            }
+            .scrollContentBackground(.hidden)
+            .scrollIndicators(.hidden)
+            .background(Color.customBackground)
+        }
+        .sheet(isPresented: $showingDatePicker) {
+            NavigationStack {
+                DatePicker("", selection: $selectedDate, displayedComponents: [.date])
+                    .datePickerStyle(.graphical)
+                    .padding()
+                    .navigationTitle("Select Date")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("Done") {
+                                showingDatePicker = false
+                            }
+                        }
+                    }
+            }
+            .presentationDetents([.height(400)])
+            .presentationDragIndicator(.visible)
+        }
+        .onAppear {
+            isTitleFocused = true
+            selectedList = eventStore.defaultCalendarForNewReminders()
+        }
+    }
+    
+    private func createTaskIfValid() {
+        guard !taskTitle.isEmpty && selectedList != nil else { return }
+        createTask()
+    }
+    
+    private func createTask() {
+        guard let calendar = selectedList else { return }
+        
+        let reminder = EKReminder(eventStore: eventStore)
+        reminder.title = taskTitle
+        reminder.notes = notes
+        reminder.calendar = calendar
+        reminder.priority = isPriority ? 1 : 0  // Set priority (1 for high, 0 for none)
+        reminder.dueDateComponents = Calendar.current.dateComponents(
+            [.year, .month, .day, .hour, .minute],
+            from: selectedDate.mergingTime(selectedTime)
+        )
+        
+        do {
+            try eventStore.save(reminder, commit: true)
+            HapticManager.selection()
+            Task {
+                await updateApplicationBadge(eventStore: eventStore)
+            }
+            dismiss()
+        } catch {
+            print("Error saving reminder: \(error)")
+        }
     }
 }
 
