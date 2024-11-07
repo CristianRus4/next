@@ -2714,14 +2714,14 @@ func updateApplicationBadge(eventStore: EKEventStore) async {
                 return dueDate >= today && 
                        dueDate < tomorrow && 
                        !reminder.isCompleted
-            }.count
+            }
             
-            taskCount += filteredCount
+            todayTasks.append(contentsOf: filtered)
         }
         
         // Update the app badge
         await MainActor.run {
-            UNUserNotificationCenter.current().setBadgeCount(taskCount) { error in
+            UNUserNotificationCenter.current().setBadgeCount(todayTasks.count) { error in
                 if let error = error {
                     print("Error setting badge count: \(error)")
                 }
